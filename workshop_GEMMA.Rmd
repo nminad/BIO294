@@ -1,0 +1,154 @@
+---
+title: "bio294_GEMMA"
+author: "Nikos"
+date: "11/13/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{bash}
+cd ~/Documents/Project/Bio294/workshop/
+```
+
+## Phenotype
+
+### Create a tab delimited file (if needed) instead of csv
+
+### The phenofile should have the names in the first column and the values in the columns following (no headers)
+
+setwd('~/Documents/Project/Bio294/workshop/binaries')
+
+getwd()
+
+phenofile <- read.table('8_4_20_rice_blast_GWAS_trans.csv', sep = ",", header = F)
+
+head(phenofile)
+
+### remove the first row
+phenofile <- phenofile[-1,]
+
+head(phenofile)
+
+write.table(phenofile, "~/Documents/Project/Bio294/workshop/binaries/phenofile", sep = "\t", row.names = F, col.names = F)
+
+
+### Replace 6th column of your .fam file with the first column of your data (in my case 2nd). Replace the columns following in the same order. (Better do this in R, not awk)
+
+#### Missing data should be represented by "NA" or "-9". For binary traits label controls as 0 and cases as 1
+
+phenoriginal <- read.table("phenofile")
+
+famoriginal <- read.table("binary.fam")
+  
+famfile <- data.frame(famoriginal$V1, famoriginal$V2, famoriginal$V3, famoriginal$V4, famoriginal$V5, phenoriginal$V2)
+
+write.table(famfile, "~/Documents/Project/Bio294/workshop/binaries/binary2.fam", sep = " ", row.names = F, col.names = F)
+
+## Relatedness matrix
+
+### Create the relatedness matrix. -gk 1 or 2 refers to the different methods of estimating it (more here. also compare the two methods)
+
+```{bash, eval=FALSE}
+gemma -bfile binary -gk 2 -o structure
+```
+
+### Check the result in a PCA. Also import libraries for later
+
+library(raster)
+library(sp)
+library(rgdal)
+library(magrittr)
+library(reshape2)
+library(ggplot2)
+library(qqman)
+library(cowplot)
+library(tidyverse)
+
+my_data <- read.table('./output/structure.sXX.txt')
+PCA <- prcomp(my_data)
+plot(PCA$x)
+
+## Association Tests with Univariate Linear Mixed Models
+
+### (-lmm 2 performs likelihood ratio test, -n 1 is the first phenotype in the .fam file [6th column])
+
+```{bash, eval=FALSE}
+gemma -bfile binary -k ./output/structure.sXX.txt -lmm 2 -n 1 -o ULMM_output
+
+head ./output/ULMM_output.assoc.txt | column -t
+```
+
+## Plots in R
+
+### Import GEMMA results
+
+gwscan <- read.table("./output/ULMM_output.assoc.txt",
+                     as.is = "rs", header = TRUE)
+
+### Create a "genomic inflation" plot. The observed negative log10 p-values against the expected p-values under the null distribution.
+
+
+# Get the number of p-values.
+n <- length(gwscan$p_lrt)
+  
+# Compute the negative log10(p-values), and sort them from largest to smallest.
+y <- rev(sort(-log10(gwscan$p_lrt)))
+  
+# Create the q-q plot.
+ggplot(data.frame(x = -log10((1:n)/n),y = y),aes(x = x,y = y)) +
+          geom_abline(intercept = 0,slope = 1,color = "magenta") +
+          geom_point(color = "dodgerblue",shape = 20,size = 2) +
+          labs(x = "Expected -log10 p-value",
+               y = "Observed -log10 p-value") +
+          theme(axis.line = element_blank())
+
+### Create Manhattan Plot (for the likelihood ratio test)
+
+n <- nrow(gwscan)
+
+# Add a column with the number of SNPs
+gwscan <- cbind(gwscan,marker = 1:n)
+  
+# Convert the p-values to the -log10 scale.
+gwscan <- transform(gwscan,p_lrt = -log10(p_lrt))
+  
+# Add column "odd.chr" to the table, and find the positions of the chromosomes along the x-axis.
+gwscan <- transform(gwscan,odd.chr = (chr %% 2) == 1)
+x.chr  <- tapply(gwscan$marker,gwscan$chr,mean)
+  
+# Create the genome-wide scan.
+ggplot(gwscan,aes(x = marker,y = p_lrt,color = odd.chr)) +
+          geom_point(size = 1, shape = 20) +
+          scale_x_continuous(breaks = x.chr,labels = 1:5) +
+          scale_color_manual(values = c("skyblue","darkblue"),guide = "none") +
+          labs(x = "",y = "-log10 p-value") +
+          theme_cowplot(font_size = 10) +
+          theme(axis.line = element_blank(),
+                axis.ticks.x = element_blank())
+    
+### Take the top candidates
+
+SNPSordered <- gwscan[order(gwscan$p_lrt, decreasing = TRUE), ]
+topSNPs <- top_n(SNPSordered, 200, SNPSordered$p_lrt)
+
+write.csv(topSNPs, "~/Documents/Project/Bio294/workshop/binaries/topSNPs.csv")
+
+### Zoom in chr
+
+
+gwscan_chr3 <- subset(gwscan, chr == 3)
+
+# Convert the positions to the Megabase (Mb) scale.
+gwscan <- transform(gwscan_chr3,ps = ps/1e6)
+  
+# Create a Manhattan plot.
+ggplot(gwscan,aes(x = ps,y = p_lrt)) +
+           geom_point(color = "darkblue",size = 1,shape = 20) +
+           labs(x = "base-pair position (Mb)",y = "-log10 p-value",title = "Fr13_rel_lesion_left_chr3") +
+           theme_cowplot(font_size = 10) +
+           theme(axis.line = element_blank())
+
